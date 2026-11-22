@@ -35,6 +35,10 @@ export function run(input) {
   const rows = [];
   let columns = null;
   let width = -1;
+  // How the last field ended: 0 = comma, 1 = line break, 2 = end of text.
+  // Set by readUnquoted/readQuoted; helpers return the value string only,
+  // so no per-field result object is allocated (709k fields per set).
+  let ended = 0;
 
   let pos = 0; // the next character to read
   let line = 1; // the line that character is on
@@ -46,14 +50,13 @@ export function run(input) {
   let recordRow = null;
 
   // Reads an unquoted field starting at pos, onto `initial` ('' for a plain
-  // field, the quoted value for the junk after a closing quote). Returns
-  // {value, ended, added}: added counts the characters kept here (the junk
-  // after a closing quote counts only what it adds). The span up to the next
+  // field, the quoted value for the junk after a closing quote). Returns the
+  // value string and sets `ended` (0 = comma, 1 = line break, 2 = end of
+  // text). The span up to the next
   // comma or line break is sliced first, so a search for CRs never runs past
   // the field's own end.
   function readUnquoted(initial) {
     let value = initial;
-    let added = 0;
     for (;;) {
       const c = text.indexOf(',', pos);
       const l = text.indexOf('\n', pos);
@@ -76,26 +79,24 @@ export function run(input) {
       const r = span.indexOf('\r');
       if (r === -1) {
         value += span;
-        added += span.length;
         if (isComma) {
           pos = end + 1;
-          return { value, ended: 0, added };
+          ended = 0; return value;
         }
         if (end < n) {
           pos = end + 1;
           line += 1;
-          return { value, ended: 1, added };
+          ended = 1; return value;
         }
         pos = end;
-        return { value, ended: 2, added };
+        ended = 2; return value;
       }
       if (r === span.length - 1 && !isComma && end < n) {
         // CRLF: the CR is part of the line break, not the field.
         value += span.slice(0, -1);
-        added += span.length - 1;
         pos = end + 1;
         line += 1;
-        return { value, ended: 1, added };
+        ended = 1; return value;
       }
       // Lone CR(s) in the span: each is dropped (stray_cr). A CR at the
       // span's very end is the CRLF's CR when the span ends at a line break,
@@ -114,22 +115,22 @@ export function run(input) {
       }
       cleaned += span.slice(from, lastIsCrlf ? span.length - 1 : span.length);
       value += cleaned;
-      added += cleaned.length;
       if (isComma) {
         pos = end + 1;
-        return { value, ended: 0, added };
+        ended = 0; return value;
       }
       if (end < n) {
         pos = end + 1;
         line += 1;
-        return { value, ended: 1, added };
+        ended = 1; return value;
       }
       pos = end;
-      return { value, ended: 2, added };
+      ended = 2; return value;
     }
   }
 
-  // Reads a quoted field whose opening quote is at pos.
+  // Reads a quoted field whose opening quote is at pos. Returns the value
+  // string and sets `ended` (see readUnquoted).
   function readQuoted() {
     const open = pos;
     const openLine = line;
@@ -167,27 +168,27 @@ export function run(input) {
       // The closing quote.
       pos = q + 1;
       const value = parts.join('');
-      if (pos >= n) return { value, ended: 2 };
+      if (pos >= n) { ended = 2; return value; }
       const c = text.charCodeAt(pos);
       if (c === COMMA) {
         pos += 1;
-        return { value, ended: 0 };
+        ended = 0; return value;
       }
       if (c === LF) {
         pos += 1;
         line += 1;
-        return { value, ended: 1 };
+        ended = 1; return value;
       }
       if (c === CR && text.charCodeAt(pos + 1) === LF) {
         pos += 2;
         line += 1;
-        return { value, ended: 1 };
+        ended = 1; return value;
       }
       // What follows the closing quote is appended as it stands, up to the
       // next comma or line break.
-      const junk = readUnquoted(value);
-      if (junk.added > 0) errors.push({ code: 'quote_junk', line: recordLine, row: recordRow });
-      return junk;
+      const junkValue = readUnquoted(value);
+      if (junkValue.length > value.length) errors.push({ code: 'quote_junk', line: recordLine, row: recordRow });
+      return junkValue;
     }
   }
 
@@ -210,13 +211,11 @@ export function run(input) {
     recordLine = line;
     recordRow = header && columns === null ? null : rows.length;
     const fields = [];
-    let field;
     let quoted;
     do {
       quoted = text.charCodeAt(pos) === QUOTE;
-      field = quoted ? readQuoted() : readUnquoted('');
-      fields.push(field.value);
-    } while (field.ended === 0);
+      fields.push(quoted ? readQuoted() : readUnquoted(''));
+    } while (ended === 0);
 
     // A line that held only stray CRs is left with no characters: no record
     // (its stray_cr errors stay).
